@@ -1,0 +1,144 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Two Lambda functions: one triggered by SQS, another by API Gateway"
+
+Resources:
+
+  #######################################
+  # IAM Roles
+  #######################################
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SQSPermission
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt MyQueue.Arn
+
+  #######################################
+  # SQS Queue
+  #######################################
+
+  MyQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: my-processing-queue
+
+  #######################################
+  # Lambda triggered by SQS
+  #######################################
+
+  SQSLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: sqsHandlerLambda
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("SQS Event:", JSON.stringify(event))
+            return {}
+          }
+
+  # Event Source Mapping (SQS -> Lambda)
+  SQSLambdaEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      EventSourceArn: !GetAtt MyQueue.Arn
+      FunctionName: !Ref SQSLambda
+      Enabled: true
+
+  #######################################
+  # Lambda invoked by API Gateway
+  #######################################
+
+  ApiLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: httpHandlerLambda
+      Handler: index.handler
+      Runtime: nodejs18.x
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            return {
+              statusCode: 200,
+              body: JSON.stringify({ message: "Hello from API Lambda!" })
+            }
+          }
+
+  #######################################
+  # API Gateway HTTP API
+  #######################################
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: MyHttpApi
+      ProtocolType: HTTP
+
+  # Integration
+  ApiLambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiLambda.Arn}/invocations
+      PayloadFormatVersion: "2.0"
+
+  # Route
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /hello"
+      Target: !Sub integrations/${ApiLambdaIntegration}
+
+  # Permission for API Gateway to call Lambda
+  ApiLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ApiLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/GET/hello
+
+  # API Deployment Stage
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: prod
+      AutoDeploy: true
+
+Outputs:
+  HttpApiUrl:
+    Description: "Base URL of the HTTP API"
+    Value: !Sub "https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/prod/hello"
+
+  QueueUrl:
+    Description: "URL of the SQS Queue"
+    Value: !Ref MyQueue
